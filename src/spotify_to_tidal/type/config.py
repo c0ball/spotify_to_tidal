@@ -20,7 +20,13 @@ class PlaylistConfig(TypedDict):
     tidal_id: str
 
 
+class DiscoverWeeklyConfig(TypedDict):
+    enabled: bool
+    overwrite: bool
+
+
 class SyncConfig(TypedDict):
     spotify: SpotifyConfig
     sync_playlists: Optional[List[PlaylistConfig]]
     excluded_playlists: Optional[List[str]]
+    sync_discover_weekly: Optional[DiscoverWeeklyConfig]

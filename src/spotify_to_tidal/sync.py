@@ -545,6 +545,141 @@ async def sync_albums(spotify_session: spotipy.Spotify, tidal_session: tidalapi.
     print("Album synchronization complete.")
 
 
+async def find_discover_weekly_playlist(spotify_session: spotipy.Spotify) -> dict | None:
+    """Find the user's Discover Weekly playlist on Spotify."""
+    print("Searching for Discover Weekly playlist on Spotify")
+    
+    # Get all user playlists
+    playlists = []
+    first_results = spotify_session.current_user_playlists()
+    playlists.extend(first_results['items'])
+    
+    # Get all remaining playlists if there are more
+    if first_results['next']:
+        offsets = [first_results['limit'] * n for n in range(1, math.ceil(first_results['total']/first_results['limit']))]
+        extra_results = await atqdm.gather(*[asyncio.to_thread(spotify_session.current_user_playlists, offset=offset) for offset in offsets])
+        for extra_result in extra_results:
+            playlists.extend(extra_result['items'])
+    print(playlists)
+    # Find Discover Weekly playlist
+    for playlist in playlists:
+        if playlist['name'] == 'Discover Weekly':
+            print(f"Found Discover Weekly playlist: {playlist['id']}")
+            return playlist
+    
+    print("Discover Weekly playlist not found")
+    return None
+
+
+def get_discover_weekly_tidal_playlist_name(overwrite: bool) -> str:
+    """Generate the name for the Tidal Discover Weekly playlist based on overwrite mode."""
+    if overwrite:
+        return "Discover Weekly"
+    else:
+        # Get the date of the most recent Monday
+        today = datetime.date.today()
+        days_since_monday = today.weekday()  # Monday is 0
+        last_monday = today - datetime.timedelta(days=days_since_monday)
+        return f"Discover Weekly {last_monday.strftime('%d.%m.%Y')}"
+
+
+async def find_or_create_tidal_discover_weekly_playlist(tidal_session: tidalapi.Session, playlist_name: str, description: str = None) -> tidalapi.Playlist:
+    """Find or create a Discover Weekly playlist on Tidal."""
+    print(f"Searching for Tidal playlist: '{playlist_name}'")
+    
+    # Get all user playlists from Tidal
+    tidal_playlists = await get_all_playlists(tidal_session.user)
+    
+    # Look for existing playlist with the exact name
+    for playlist in tidal_playlists:
+        if playlist.name == playlist_name:
+            print(f"Found existing Tidal playlist: '{playlist_name}'")
+            return playlist
+    
+    # Create new playlist if not found
+    print(f"Creating new Tidal playlist: '{playlist_name}'")
+    if description is None:
+        description = f"Spotify Discover Weekly synchronization - {datetime.date.today().strftime('%d.%m.%Y')}"
+    
+    return tidal_session.user.create_playlist(playlist_name, description)
+
+
+async def sync_discover_weekly(spotify_session: spotipy.Spotify, tidal_session: tidalapi.Session, config: dict):
+    """Sync Spotify Discover Weekly playlist to Tidal."""
+    discover_weekly_config = config.get('sync_discover_weekly', {})
+    
+    if not discover_weekly_config.get('enabled', False):
+        print("Discover Weekly sync is disabled")
+        return
+    
+    print("Starting Discover Weekly synchronization")
+    
+    # Find Spotify Discover Weekly playlist
+    spotify_playlist = await find_discover_weekly_playlist(spotify_session)
+    if not spotify_playlist:
+        print("Could not find Discover Weekly playlist on Spotify")
+        return
+    
+    # Get tracks from Spotify Discover Weekly
+    spotify_tracks = await get_tracks_from_spotify_playlist(spotify_session, spotify_playlist)
+    if not spotify_tracks:
+        print("No tracks found in Discover Weekly playlist")
+        return
+    
+    # Determine Tidal playlist name based on overwrite mode
+    overwrite = discover_weekly_config.get('overwrite', True)
+    tidal_playlist_name = get_discover_weekly_tidal_playlist_name(overwrite)
+    
+    # Find or create Tidal playlist
+    tidal_playlist = await find_or_create_tidal_discover_weekly_playlist(
+        tidal_session, 
+        tidal_playlist_name,
+        spotify_playlist.get('description', '')
+    )
+    
+    # Get existing tracks if overwrite is disabled
+    if not overwrite:
+        old_tidal_tracks = await get_all_playlist_tracks(tidal_playlist)
+    else:
+        old_tidal_tracks = []
+    
+    # Search and cache track mappings
+    populate_track_match_cache(spotify_tracks, old_tidal_tracks)
+    await search_new_tracks_on_tidal(tidal_session, spotify_tracks, tidal_playlist_name, config)
+    new_tidal_track_ids = get_tracks_for_new_tidal_playlist(spotify_tracks)
+    
+    # Update the Tidal playlist
+    if overwrite:
+        print(f"Overwriting Tidal playlist '{tidal_playlist_name}' with {len(new_tidal_track_ids)} tracks")
+        clear_tidal_playlist(tidal_playlist)
+        if new_tidal_track_ids:
+            add_multiple_tracks_to_playlist(tidal_playlist, new_tidal_track_ids)
+    else:
+        # Only add tracks if they don't already exist
+        old_tidal_track_ids = [t.id for t in old_tidal_tracks]
+        if new_tidal_track_ids == old_tidal_track_ids:
+            print("No changes to write to Tidal playlist")
+        elif new_tidal_track_ids[:len(old_tidal_track_ids)] == old_tidal_track_ids:
+            # Append new tracks to the existing playlist
+            new_tracks_to_add = new_tidal_track_ids[len(old_tidal_track_ids):]
+            if new_tracks_to_add:
+                print(f"Adding {len(new_tracks_to_add)} new tracks to Tidal playlist '{tidal_playlist_name}'")
+                add_multiple_tracks_to_playlist(tidal_playlist, new_tracks_to_add)
+        else:
+            # Replace entire playlist if reordering occurred
+            print(f"Replacing entire Tidal playlist '{tidal_playlist_name}' with {len(new_tidal_track_ids)} tracks")
+            clear_tidal_playlist(tidal_playlist)
+            if new_tidal_track_ids:
+                add_multiple_tracks_to_playlist(tidal_playlist, new_tidal_track_ids)
+    
+    print("Discover Weekly synchronization complete")
+
+
+def sync_discover_weekly_wrapper(spotify_session: spotipy.Spotify, tidal_session: tidalapi.Session, config: dict):
+    """Wrapper for sync_discover_weekly to be called from main."""
+    asyncio.run(sync_discover_weekly(spotify_session=spotify_session, tidal_session=tidal_session, config=config))
+
+
 def sync_playlists_wrapper(spotify_session: spotipy.Spotify, tidal_session: tidalapi.Session, playlists, config: dict):
   for spotify_playlist, tidal_playlist in playlists:
     # sync the spotify playlist to tidal
