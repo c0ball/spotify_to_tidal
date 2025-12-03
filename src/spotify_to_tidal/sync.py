@@ -203,7 +203,11 @@ async def get_tracks_from_spotify_playlist(spotify_session: spotipy.Spotify, spo
     print(f"Loading tracks from Spotify playlist '{spotify_playlist['name']}'")
     items = await repeat_on_request_error( _fetch_all_from_spotify_in_chunks, lambda offset: _get_tracks_from_spotify_playlist(offset=offset, playlist_id=spotify_playlist["id"]))
     track_filter = lambda item: item.get('type', 'track') == 'track' # type may be 'episode' also
-    sanity_filter = lambda item: 'album' in item and 'name' in item['album'] and 'artists' in item['album'] and len(item['album']['artists']) > 0
+    sanity_filter = lambda item: ('album' in item
+                                  and 'name' in item['album']
+                                  and 'artists' in item['album']
+                                  and len(item['album']['artists']) > 0
+                                  and item['album']['artists'][0]['name'] is not None)
     return list(filter(sanity_filter, filter(track_filter, items)))
 
 def populate_track_match_cache(spotify_tracks_: Sequence[t_spotify.SpotifyTrack], tidal_tracks_: Sequence[tidalapi.Track]):
@@ -296,7 +300,9 @@ async def search_new_tracks_on_tidal(tidal_session: tidalapi.Session, spotify_tr
             color = ('\033[91m', '\033[0m')
             print(color[0] + "Could not find the track " + song404[-1] + color[1])
     file_name = "songs not found.txt"
+    header = f"==========================\nPlaylist: {playlist_name}\n==========================\n"
     with open(file_name, "a", encoding="utf-8") as file:
+        file.write(header)
         for song in song404:
             file.write(f"{song}\n")
 
@@ -665,7 +671,7 @@ async def get_playlists_from_spotify(spotify_session: spotipy.Spotify, config):
             playlists.extend([p for p in extra_result['items']])
 
     # filter out playlists that don't belong to us or are on the exclude list
-    my_playlist_filter = lambda p: p['owner']['id'] == user_id
+    my_playlist_filter = lambda p: p and p['owner']['id'] == user_id
     exclude_filter = lambda p: not p['id'] in exclude_list
     return list(filter( exclude_filter, filter( my_playlist_filter, playlists )))
 
